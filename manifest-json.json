@@ -1,0 +1,24 @@
+{
+  "name": "Cozy Fish Tank",
+  "short_name": "Fish Tank",
+  "description": "A relaxing fish tank game where you can feed colorful fish",
+  "start_url": "/",
+  "display": "fullscreen",
+  "orientation": "any",
+  "theme_color": "#87CEEB",
+  "background_color": "#87CEEB",
+  "icons": [
+    {
+      "src": "icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

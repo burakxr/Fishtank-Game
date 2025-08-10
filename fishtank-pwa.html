@@ -1,0 +1,528 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="theme-color" content="#87CEEB">
+    <title>Cozy Fish Tank</title>
+    
+    <!-- PWA Manifest -->
+    <link rel="manifest" href="manifest.json">
+    
+    <!-- iOS specific -->
+    <link rel="apple-touch-icon" href="icon-192.png">
+    <meta name="apple-mobile-web-app-title" content="Fish Tank">
+    
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            -webkit-touch-callout: none;
+            -webkit-user-select: none;
+            user-select: none;
+            touch-action: none;
+        }
+        
+        body {
+            overflow: hidden;
+            position: fixed;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(to bottom, #e0f2fe, #bae6fd);
+        }
+        
+        #root {
+            position: fixed;
+            inset: 0;
+            width: 100%;
+            height: 100%;
+        }
+        
+        .game-container {
+            position: fixed;
+            inset: 0;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(to bottom, #e0f2fe, #bae6fd);
+        }
+        
+        .instructions {
+            position: absolute;
+            z-index: 10;
+            left: 12px;
+            top: env(safe-area-inset-top, 12px);
+            font-size: 12px;
+            padding: 6px 12px;
+            border-radius: 20px;
+            background-color: rgba(0, 0, 0, 0.4);
+            color: white;
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+        }
+        
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+        
+        .install-prompt {
+            position: fixed;
+            bottom: env(safe-area-inset-bottom, 20px);
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0, 0, 0, 0.8);
+            color: white;
+            padding: 12px 20px;
+            border-radius: 25px;
+            font-size: 14px;
+            z-index: 100;
+            display: none;
+            animation: slideUp 0.3s ease-out;
+        }
+        
+        @keyframes slideUp {
+            from { transform: translateX(-50%) translateY(100px); }
+            to { transform: translateX(-50%) translateY(0); }
+        }
+    </style>
+</head>
+<body>
+    <div id="root">
+        <div class="game-container">
+            <div class="instructions">Tap, drag, and release to feed the fish</div>
+            <canvas id="gameCanvas"></canvas>
+        </div>
+    </div>
+    
+    <div id="installPrompt" class="install-prompt">
+        Tap Share → Add to Home Screen
+    </div>
+
+    <script>
+        // Register service worker for offline support
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('sw.js').catch(e => console.log('SW registration failed'));
+        }
+        
+        // Show install prompt for iOS
+        if (window.navigator.standalone === false && /iPhone|iPad|iPod/.test(navigator.userAgent)) {
+            setTimeout(() => {
+                const prompt = document.getElementById('installPrompt');
+                prompt.style.display = 'block';
+                setTimeout(() => prompt.style.display = 'none', 5000);
+            }, 2000);
+        }
+        
+        // Prevent bounce scrolling on iOS
+        document.addEventListener('touchmove', e => e.preventDefault(), { passive: false });
+        
+        // Game code (converted from React)
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const dpr = Math.max(1, window.devicePixelRatio || 1);
+        
+        // Game state
+        const state = {
+            fish: [],
+            pellets: [],
+            ripples: [],
+            bubbles: [],
+            motes: [],
+            splashes: [],
+            pointer: { x: 0, y: 0, down: false, dragging: false },
+            surfaceY: 90,
+            tankPadding: 20,
+            ambientBubbleCooldown: 0,
+            noiseCanvas: null,
+            w: 0,
+            h: 0,
+            last: performance.now()
+        };
+        
+        // Color palette
+        const colors = ["#FFD1DC", "#CDE7FF", "#C4F1BE", "#FFF2B2", "#F6D6FF", "#BDE0FE"];
+        
+        // Helper functions
+        const rand = (a, b) => a + Math.random() * (b - a);
+        const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+        const dist = (x1, y1, x2, y2) => Math.hypot(x2 - x1, y2 - y1);
+        
+        function resize() {
+            const { clientWidth, clientHeight } = canvas;
+            canvas.width = Math.max(1, Math.floor(clientWidth * dpr));
+            canvas.height = Math.max(1, Math.floor(clientHeight * dpr));
+            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+            
+            const rect = canvas.getBoundingClientRect();
+            state.w = rect.width;
+            state.h = rect.height;
+            state.surfaceY = Math.round(Math.min(rect.height - state.tankPadding - 160, 
+                                                  Math.max(state.tankPadding + 40, rect.height * 0.38)));
+        }
+        
+        function makeNoiseCanvas() {
+            const nc = document.createElement('canvas');
+            nc.width = nc.height = 128;
+            const nctx = nc.getContext('2d');
+            const id = nctx.createImageData(nc.width, nc.height);
+            const data = id.data;
+            for (let i = 0; i < data.length; i += 4) {
+                const v = 200 + Math.random() * 55;
+                data[i] = data[i+1] = data[i+2] = v;
+                data[i+3] = 255;
+            }
+            nctx.putImageData(id, 0, 0);
+            return nc;
+        }
+        
+        function createFish() {
+            const n = 7;
+            for (let i = 0; i < n; i++) {
+                const size = rand(14, 22);
+                state.fish.push({
+                    x: rand(state.tankPadding + 40, state.w - state.tankPadding - 40),
+                    y: rand(state.surfaceY + 60, state.h - state.tankPadding - 40),
+                    vx: rand(-20, 20),
+                    vy: rand(-10, 10),
+                    color: colors[i % colors.length],
+                    angle: rand(0, Math.PI * 2),
+                    speed: rand(28, 42),
+                    state: "wander",
+                    eatTimer: 0,
+                    size
+                });
+            }
+        }
+        
+        function createMotes() {
+            const count = 70;
+            for (let i = 0; i < count; i++) {
+                state.motes.push({
+                    x: rand(state.tankPadding + 10, state.w - state.tankPadding - 10),
+                    y: rand(state.surfaceY + 30, state.h - state.tankPadding - 10),
+                    vx: rand(-5, 5),
+                    vy: -rand(6, 18),
+                    alpha: rand(0.08, 0.22),
+                    size: rand(1, 2.5)
+                });
+            }
+        }
+        
+        function addPellet(x, y) {
+            state.pellets.push({
+                x, y,
+                vy: 0,
+                r: 5,
+                life: 10,
+                inAir: y < state.surfaceY,
+                rippleDone: false,
+                dropH: Math.max(0, state.surfaceY - y)
+            });
+        }
+        
+        // Touch/Mouse handlers
+        function toLocal(e) {
+            const rect = canvas.getBoundingClientRect();
+            const touch = e.touches ? e.touches[0] : e;
+            state.pointer.x = touch.clientX - rect.left;
+            state.pointer.y = touch.clientY - rect.top;
+        }
+        
+        function onPointerDown(e) {
+            e.preventDefault();
+            toLocal(e);
+            state.pointer.down = true;
+            state.pointer.dragging = true;
+        }
+        
+        function onPointerMove(e) {
+            if (state.pointer.down) {
+                e.preventDefault();
+                toLocal(e);
+            }
+        }
+        
+        function onPointerUp(e) {
+            e.preventDefault();
+            toLocal(e);
+            if (state.pointer.dragging) {
+                addPellet(state.pointer.x, state.pointer.y);
+            }
+            state.pointer.down = false;
+            state.pointer.dragging = false;
+        }
+        
+        // Add both touch and mouse support
+        canvas.addEventListener('touchstart', onPointerDown, { passive: false });
+        canvas.addEventListener('touchmove', onPointerMove, { passive: false });
+        canvas.addEventListener('touchend', onPointerUp, { passive: false });
+        canvas.addEventListener('mousedown', onPointerDown);
+        canvas.addEventListener('mousemove', onPointerMove);
+        canvas.addEventListener('mouseup', onPointerUp);
+        
+        // Update functions (simplified versions of the React code)
+        function updateFish(dt) {
+            const hasFood = state.pellets.length > 0;
+            
+            for (const f of state.fish) {
+                if (f.state === "eating") {
+                    f.eatTimer -= dt;
+                    if (f.eatTimer <= 0) f.state = "wander";
+                }
+                
+                if (hasFood && f.state !== "eating") {
+                    f.state = "chase";
+                } else if (!hasFood && f.state !== "eating") {
+                    f.state = "wander";
+                }
+                
+                let targetVX = f.vx, targetVY = f.vy;
+                
+                if (f.state === "wander") {
+                    f.angle += rand(-0.6, 0.6) * dt;
+                    targetVX = Math.cos(f.angle) * f.speed;
+                    targetVY = Math.sin(f.angle) * f.speed * 0.6;
+                } else if (f.state === "chase") {
+                    let nearest = null, dmin = Infinity;
+                    for (const p of state.pellets) {
+                        const d = dist(f.x, f.y, p.x, p.y);
+                        if (d < dmin) { dmin = d; nearest = p; }
+                    }
+                    if (nearest) {
+                        const dx = nearest.x - f.x;
+                        const dy = nearest.y - f.y;
+                        const len = Math.hypot(dx, dy) || 1;
+                        targetVX = (dx / len) * f.speed * 1.3;
+                        targetVY = (dy / len) * f.speed * 1.3;
+                        
+                        if (len < f.size * 0.9 + nearest.r + 1) {
+                            const idx = state.pellets.indexOf(nearest);
+                            if (idx >= 0) state.pellets.splice(idx, 1);
+                            f.state = "eating";
+                            f.eatTimer = 0.8;
+                        }
+                    }
+                }
+                
+                f.vx = f.vx * 0.88 + targetVX * 0.12;
+                f.vy = f.vy * 0.88 + targetVY * 0.12;
+                f.x += f.vx * dt;
+                f.y += f.vy * dt;
+                
+                // Keep fish in bounds
+                const left = state.tankPadding + f.size * 0.6;
+                const right = state.w - state.tankPadding - f.size * 0.6;
+                const top = state.surfaceY + f.size * 0.8;
+                const bottom = state.h - state.tankPadding - f.size * 0.6;
+                
+                if (f.x < left) { f.x = left; f.vx = Math.abs(f.vx); }
+                if (f.x > right) { f.x = right; f.vx = -Math.abs(f.vx); }
+                if (f.y < top) { f.y = top; f.vy = Math.abs(f.vy); }
+                if (f.y > bottom) { f.y = bottom; f.vy = -Math.abs(f.vy); }
+            }
+        }
+        
+        function updatePellets(dt) {
+            const G_AIR = 2200;
+            const G_WATER = 900;
+            const DRAG_WATER = 0.88;
+            
+            for (let i = state.pellets.length - 1; i >= 0; i--) {
+                const p = state.pellets[i];
+                
+                if (p.inAir) {
+                    p.vy += G_AIR * dt;
+                    p.y += p.vy * dt;
+                    
+                    if (p.y >= state.surfaceY) {
+                        if (!p.rippleDone) {
+                            const intensity = clamp(p.dropH / 300, 0, 1);
+                            state.ripples.push({
+                                x: p.x,
+                                r: 2,
+                                alpha: 0.6 + 0.35 * intensity,
+                                life: 0.5 + 1.3 * intensity,
+                                grow: 100 + 180 * intensity,
+                                impactAmp: 1 + 6 * intensity
+                            });
+                            p.rippleDone = true;
+                        }
+                        p.inAir = false;
+                        p.vy *= 0.35;
+                    }
+                } else {
+                    p.vy += G_WATER * dt;
+                    p.vy *= DRAG_WATER;
+                    p.y += p.vy * dt;
+                }
+                
+                p.life -= dt;
+                
+                if (p.y > state.h - state.tankPadding - p.r) {
+                    p.y = state.h - state.tankPadding - p.r;
+                    p.vy *= -0.25;
+                    p.r *= 0.995;
+                }
+                
+                if (p.life < 0 || p.r < 1.2) {
+                    state.pellets.splice(i, 1);
+                }
+            }
+        }
+        
+        function updateRipples(dt) {
+            for (let i = state.ripples.length - 1; i >= 0; i--) {
+                const r = state.ripples[i];
+                r.r += (r.grow || 120) * dt;
+                r.life -= dt;
+                r.alpha = Math.max(0, r.life);
+                if (r.life <= 0) state.ripples.splice(i, 1);
+            }
+        }
+        
+        // Draw functions
+        function drawBackground(t) {
+            const A = 8;
+            const L = 160;
+            
+            // Air gradient
+            const air = ctx.createLinearGradient(0, 0, 0, state.h);
+            air.addColorStop(0, "#f9fbff");
+            air.addColorStop(0.4, "#d0e7ff");
+            ctx.fillStyle = air;
+            ctx.fillRect(0, 0, state.w, state.h);
+            
+            // Water with wave
+            ctx.save();
+            ctx.beginPath();
+            ctx.moveTo(0, state.h);
+            for (let x = 0; x <= state.w; x += 6) {
+                const y = state.surfaceY + Math.sin((x + t * 30) / L * Math.PI * 2) * A;
+                ctx.lineTo(x, y);
+            }
+            ctx.lineTo(state.w, state.h);
+            ctx.closePath();
+            ctx.clip();
+            
+            const water = ctx.createLinearGradient(0, state.surfaceY - A - 8, 0, state.h);
+            water.addColorStop(0, "#6fc1ff");
+            water.addColorStop(1, "#1c7cc7");
+            ctx.fillStyle = water;
+            ctx.fillRect(0, 0, state.w, state.h);
+            ctx.restore();
+            
+            // Tank border
+            ctx.strokeStyle = "rgba(255,255,255,0.65)";
+            ctx.lineWidth = 2;
+            ctx.strokeRect(1, 1, state.w - 2, state.h - 2);
+        }
+        
+        function drawFish(t) {
+            for (const f of state.fish) {
+                const angle = Math.atan2(f.vy, f.vx);
+                const s = f.size;
+                
+                ctx.save();
+                ctx.translate(f.x, f.y);
+                ctx.rotate(angle);
+                
+                // Tail
+                const tailWave = Math.sin(t * 8 + f.x * 0.02) * (f.state === "chase" ? 5 : 3);
+                ctx.beginPath();
+                ctx.moveTo(-s * 0.9, 0);
+                ctx.lineTo(-s * 1.4, -s * 0.4 + tailWave);
+                ctx.lineTo(-s * 1.4, s * 0.4 - tailWave);
+                ctx.closePath();
+                ctx.fillStyle = f.color;
+                ctx.globalAlpha = 0.9;
+                ctx.fill();
+                
+                // Body
+                ctx.beginPath();
+                ctx.ellipse(0, 0, s, s * 0.6, 0, 0, Math.PI * 2);
+                ctx.fillStyle = f.color;
+                ctx.globalAlpha = 0.95;
+                ctx.fill();
+                
+                // Eye
+                ctx.globalAlpha = 1;
+                ctx.fillStyle = "#ffffff";
+                ctx.beginPath();
+                ctx.arc(s * 0.35, -s * 0.1, s * 0.12, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.fillStyle = "#111827";
+                ctx.beginPath();
+                ctx.arc(s * 0.38, -s * 0.1, s * 0.06, 0, Math.PI * 2);
+                ctx.fill();
+                
+                ctx.restore();
+            }
+        }
+        
+        function drawPellets() {
+            for (const p of state.pellets) {
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+                ctx.fillStyle = "#c58b2b";
+                ctx.fill();
+                
+                ctx.beginPath();
+                ctx.arc(p.x - p.r * 0.3, p.y - p.r * 0.3, p.r * 0.35, 0, Math.PI * 2);
+                ctx.fillStyle = "rgba(255,255,255,0.6)";
+                ctx.fill();
+            }
+        }
+        
+        function drawGhostPellet() {
+            if (!state.pointer.dragging) return;
+            ctx.save();
+            ctx.globalAlpha = 0.9;
+            ctx.beginPath();
+            ctx.arc(state.pointer.x, state.pointer.y, 6, 0, Math.PI * 2);
+            ctx.fillStyle = "#d5a351";
+            ctx.fill();
+            ctx.restore();
+        }
+        
+        // Main game loop
+        function gameLoop(now) {
+            const dt = Math.min(0.033, (now - state.last) / 1000);
+            state.last = now;
+            const time = now / 1000;
+            
+            ctx.clearRect(0, 0, state.w, state.h);
+            
+            // Update
+            updateRipples(dt);
+            updatePellets(dt);
+            updateFish(dt);
+            
+            // Draw
+            drawBackground(time);
+            drawPellets();
+            drawFish(time);
+            drawGhostPellet();
+            
+            requestAnimationFrame(gameLoop);
+        }
+        
+        // Initialize
+        function init() {
+            resize();
+            state.noiseCanvas = makeNoiseCanvas();
+            createFish();
+            createMotes();
+            requestAnimationFrame(gameLoop);
+        }
+        
+        window.addEventListener('resize', resize);
+        window.addEventListener('orientationchange', resize);
+        
+        init();
+    </script>
+</body>
+</html>
